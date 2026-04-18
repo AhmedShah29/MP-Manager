@@ -1,8 +1,11 @@
-name: Publish to GitHub Packages
+name: Build and Publish mpm to GitHub Packages
 
 on:
   release:
     types: [published]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   deploy:
@@ -12,23 +15,23 @@ jobs:
       packages: write
     
     steps:
-    - name: Checkout code
+    - name: Checkout Repository
       uses: actions/checkout@v4
     
-    - name: Set up Python
+    - name: Setup Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
-    - name: Install dependencies
+    - name: Install Build Dependencies
       run: |
         python -m pip install --upgrade pip
         pip install build twine
     
-    - name: Build package
+    - name: Build Python Package
       run: python -m build
     
-    - name: Publish to GitHub Packages
+    - name: Publish mpm to GitHub Packages
       env:
         TWINE_USERNAME: ${{ github.actor }}
         TWINE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
