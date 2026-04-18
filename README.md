@@ -15,20 +15,15 @@ An interactive CLI tool for creating and managing Minecraft (Java Edition) modpa
 
 ## Installation
 
-### From PyPI (Recommended)
+### From GitHub (Recommended)
 ```bash
-pip install mpm-modpack-manager
-```
-
-### From GitHub
-```bash
-pip install git+https://github.com/AhmedShah29/MP-Manager.git
+pip install git+https://github.com/yourusername/mpm.git
 ```
 
 ### From Source
 ```bash
-git clone https://github.com/AhmedShah29/MP-Manager.git
-cd MP-Manager
+git clone https://github.com/yourusername/mpm.git
+cd mpm
 pip install .
 ```
 
