@@ -12,18 +12,22 @@ An interactive CLI tool for creating and managing Minecraft (Java Edition) modpa
 - **Build & Archive**: Generate modrinth.index.json with automatic build archiving
 - **Version Management**: Update modpack and mod versions
 - **Smart Updates**: Check for mod updates with selective update options
+- **Direct CLI Mode**: All commands support non-interactive flags for scripting
+- **Auto Minecraft Version Detection**: Fetches latest MC version from Modrinth API automatically
+- **Auto Dependency Resolution**: Optional automatic dependency installation when adding mods
+- **API Caching**: Reduces redundant Modrinth API calls
 
 ## Installation
 
 ### From GitHub (Recommended)
 ```bash
-pip install git+https://github.com/yourusername/mpm.git
+pip install git+https://github.com/AhmedShah29/MP-Manager.git
 ```
 
 ### From Source
 ```bash
-git clone https://github.com/yourusername/mpm.git
-cd mpm
+git clone https://github.com/AhmedShah29/MP-Manager.git
+cd MP-Manager
 pip install .
 ```
 
@@ -34,41 +38,53 @@ pip install .
 mpm
 ```
 
-### CLI Mode
+### Direct CLI Mode
 ```bash
-mpm -n              # Create new modpack
-mpm -mpb            # Build modpack
-mpm -lmp            # List modpacks
-mpm -omp "Name"     # Open modpack
-mpm -am PROJECT_ID  # Add mod
-mpm --help          # Show all commands
+# Create modpack non-interactively (auto-detects latest MC version)
+mpm -n --name "MyPack" --loader fabric --mc-version 26.1.2
+
+# Add mod
+mpm -am AANobbMI --t        # required mod
+mpm -am AANobbMI --f        # optional mod
+
+# Open, build, list
+mpm -omp "MyPack"
+mpm -mpb
+mpm -lmp
+
+# Show help
+mpm -help
+mpm --help
+mpm -h
 ```
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `-n` | Create new modpack |
-| `-imp` | Import from app export |
-| `-imp-mr` | Import from modrinth.index.json |
-| `-mpe` | Export modpack to JSON |
-| `-omp <name>` | Open modpack |
-| `-emp` | Deactivate modpack |
-| `-am [id]` | Add mod |
-| `-rm` | Remove mod (interactive) |
-| `-rmp` | Remove modpack completely |
-| `-lmp` | List modpacks |
-| `-lm` | List mods |
-| `-mpi` | Show modpack info |
-| `-mpb` | Build modrinth.index.json |
-| `-mpvc` | Change version & update mods |
-| `-mu` | Check and apply updates |
+| Command | Description | Direct Flags |
+|---------|-------------|--------------|
+| `-n` | Create new modpack | `--name`, `--loader`, `--mc-version`, `--loader-version` |
+| `-imp` | Import from app export | (interactive) |
+| `-imp-mr` | Import from modrinth.index.json | (interactive) |
+| `-mpe` | Export modpack to JSON | (interactive) |
+| `-omp <name>` | Open modpack | `name` positional arg |
+| `-emp` | Deactivate modpack | — |
+| `-am [id]` | Add mod | `--t` (required), `--f` (optional) |
+| `-rm` | Remove mod (interactive) | — |
+| `-rmp` | Remove modpack completely | — |
+| `-lmp` | List modpacks | — |
+| `-lm` | List mods | — |
+| `-mpi` | Show modpack info | — |
+| `-mpb` | Build modrinth.index.json | — |
+| `-mpvc` | Change version & update mods | — |
+| `-mu` | Check and apply updates | — |
+| `-help`, `-h`, `--help` | Show all commands | — |
 
 ## File Structure
 
 ```
-~/.mpm/
-└── config.json          # App configuration
+# Config (platform-specific)
+# Linux/macOS: ~/.config/mpm/config.json
+# Windows:     %LOCALAPPDATA%\Modpack Manager\mpm\config.json
 
 {storage_path}/
 └── {modpack}/
@@ -92,30 +108,46 @@ mpm --help          # Show all commands
 When archiving old builds, both files are saved:
 - `modrinth.index.json` - The Modrinth-compatible export
 - `modpack.json` - Complete app data backup
+- **Auto-cleanup**: Only the 10 most recent archives are kept
 
 ### Update Handling
 - `-mpvc`: Change MC version with option to keep unsupported mods
 - `-mu`: Check for updates within same MC version
 - Selective updates: choose specific mods or update all
+- **Loader compatibility check**: Verifies loader exists for new MC version before updating
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `MPM_STORAGE_PATH` | Override the modpack storage path (stored in config) |
 
 ## Requirements
 
-- Python 3.7+
-- requests library (auto-installed)
+- Python 3.8+
+- `requests` (auto-installed)
+- `platformdirs` (auto-installed)
+
+## Development
+
+```bash
+pip install -r requirements.txt
+python -m unittest test_mpm -v
+```
 
 ## Package Structure
 
 ```
 mpm/
 ├── __init__.py      # Package init with version info
-├── __main__.py      # Entry point for python -m mpm
-├── core.py          # Main ModpackManager class (~1500 lines)
+├── __main__.py      # Entry point with argparse CLI
+├── core.py          # Main ModpackManager class
 └── ...
 ```
 
 ## Notes
 
-- Config stored in `~/.mpm/config.json` (user's home directory)
+- Config stored in platform-specific config directory via `platformdirs`
 - Get Project IDs from mod pages on Modrinth
 - Generated `modrinth.index.json` can be used for `.mrpack` files
 
