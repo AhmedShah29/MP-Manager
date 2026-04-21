@@ -3,14 +3,21 @@
 Modpack Manger CLI - A CLI tool for creating and managing Minecraft modpacks
 """
 
-import os
+import functools
 import json
+import os
 import shutil
-import hashlib
-import argparse
+import sys
 import requests
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+
+try:
+    from platformdirs import user_config_dir
+except ImportError:
+    # Fallback if platformdirs not installed
+    def user_config_dir(appname, appauthor=None):
+        return Path.home() / ".config" / appname
 
 # Modrinth API base URL
 MODRINTH_API = "https://api.modrinth.com/v2"
@@ -24,27 +31,43 @@ LOADER_DEPENDENCY_MAP = {
 }
 
 
+def handle_network_errors(func):
+    """Decorator to catch network errors gracefully. KeyboardInterrupt propagates."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except requests.Timeout:
+            print("Error: Request timed out. Please check your internet connection.")
+            return None
+        except requests.ConnectionError:
+            print("Error: Could not connect to the server. Please check your internet connection.")
+            return None
+    return wrapper
+
+
 class ModpackManager:
     def __init__(self):
-        # Store config in user's home directory for package installation compatibility
-        self.config_dir = Path.home() / ".mpm"
+        # Store config in platform-specific user config directory
+        self.config_dir = Path(user_config_dir("mpm", "Modpack Manager"))
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.config_dir / "config.json"
         self.config = self._load_config()
+        # Allow overriding storage path via environment variable
+        env_storage = os.environ.get("MPM_STORAGE_PATH")
+        if env_storage:
+            self.config["storage_path"] = env_storage
+            self._save_config()
         self.active_modpack_path: Optional[Path] = None
         self._update_active_path()
 
     def _load_config(self) -> Dict:
         """Load config file or create it"""
-        if self.config_path.exists():
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"storage_path": None, "active_modpack": None}
+        return self._read_json(self.config_path) or {"storage_path": None, "active_modpack": None}
 
     def _save_config(self):
         """Save config file"""
-        with open(self.config_path, 'w', encoding='utf-8') as f:
-            json.dump(self.config, f, indent=2, ensure_ascii=False)
+        self._write_json(self.config_path, self.config)
 
     def _update_active_path(self):
         """Update active modpack path"""
@@ -52,6 +75,31 @@ class ModpackManager:
             self.active_modpack_path = Path(self.config["storage_path"]) / self.config["active_modpack"]
         else:
             self.active_modpack_path = None
+
+    @staticmethod
+    def _read_json(path: Path) -> Optional[Dict]:
+        """Read JSON file safely"""
+        if path.exists():
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return None
+
+    @staticmethod
+    def _write_json(path: Path, data: Dict):
+        """Write JSON file safely"""
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def _cleanup_old_archives(self):
+        """Remove oldest archived builds, keeping only the 10 most recent."""
+        if not self.active_modpack_path:
+            return
+        archive_dir = self.active_modpack_path / "build_archive"
+        if not archive_dir.exists():
+            return
+        archives = sorted(archive_dir.glob("build_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in archives[10:]:
+            shutil.rmtree(old)
 
     def _ensure_storage_path(self) -> bool:
         """Ensure storage path exists"""
@@ -79,10 +127,7 @@ class ModpackManager:
         if not self.config.get("storage_path"):
             return None
         modpack_path = Path(self.config["storage_path"]) / modpack_name / "modpack.json"
-        if modpack_path.exists():
-            with open(modpack_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return None
+        return self._read_json(modpack_path)
 
     def _get_modpack_info(self, modpack_name: str) -> Optional[Dict]:
         """Get modpack metadata (compatibility wrapper)"""
@@ -106,12 +151,11 @@ class ModpackManager:
             return data.get("mods", [])
         return []
 
-    def _save_modpack_data(self, name: str, version: str, mc_version: str, 
+    def _save_modpack_data(self, name: str, version: str, mc_version: str,
                            loader: str, loader_version: str, mods: List[Dict]):
         """Save complete modpack data to single modpack.json"""
         if not self.active_modpack_path:
             return
-        modpack_path = self.active_modpack_path / "modpack.json"
         data = {
             "name": name,
             "version": version,
@@ -120,53 +164,47 @@ class ModpackManager:
             "loader_version": loader_version,
             "mods": mods
         }
-        with open(modpack_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        self._write_json(self.active_modpack_path / "modpack.json", data)
 
     def _save_mods_list(self, mods: List[Dict]):
         """Update mods list in modpack.json"""
         if not self.active_modpack_path:
             return
-        # Load existing data
         data = self._load_modpack_data(self.config.get("active_modpack", ""))
         if data:
             data["mods"] = mods
-            modpack_path = self.active_modpack_path / "modpack.json"
-            with open(modpack_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            self._write_json(self.active_modpack_path / "modpack.json", data)
 
-    def _fetch_modrinth_project(self, project_id: str) -> Optional[Dict]:
-        """Fetch project data from Modrinth"""
-        try:
-            response = requests.get(f"{MODRINTH_API}/project/{project_id}", timeout=10)
-            if response.status_code == 200:
-                return response.json()
-            print(f"Error: Project {project_id} not found (code: {response.status_code})")
-            return None
-        except requests.RequestException as e:
-            print(f"Error connecting to Modrinth: {e}")
-            return None
+    @staticmethod
+    @functools.lru_cache(maxsize=128)
+    @handle_network_errors
+    def _fetch_modrinth_project(project_id: str) -> Optional[Dict]:
+        """Fetch project data from Modrinth (cached)."""
+        response = requests.get(f"{MODRINTH_API}/project/{project_id}", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        print(f"Error: Project {project_id} not found (code: {response.status_code})")
+        return None
 
-    def _fetch_compatible_version(self, project_id: str, loader: str, mc_version: str) -> Optional[Dict]:
-        """Search for compatible mod version"""
-        try:
-            params = {
-                "loaders": f'["{loader}"]',
-                "game_versions": f'["{mc_version}"]'
-            }
-            response = requests.get(
-                f"{MODRINTH_API}/project/{project_id}/version",
-                params=params,
-                timeout=10
-            )
-            if response.status_code == 200:
-                versions = response.json()
-                if versions:
-                    return versions[0]  # First compatible version
-            return None
-        except requests.RequestException as e:
-            print(f"Error fetching versions: {e}")
-            return None
+    @staticmethod
+    @functools.lru_cache(maxsize=256)
+    @handle_network_errors
+    def _fetch_compatible_version(project_id: str, loader: str, mc_version: str) -> Optional[Dict]:
+        """Search for compatible mod version (cached)."""
+        params = {
+            "loaders": f'["{loader}"]',
+            "game_versions": f'["{mc_version}"]'
+        }
+        response = requests.get(
+            f"{MODRINTH_API}/project/{project_id}/version",
+            params=params,
+            timeout=10
+        )
+        if response.status_code == 200:
+            versions = response.json()
+            if versions:
+                return versions[0]  # First compatible version
+        return None
 
     def _extract_mod_data(self, version_data: Dict) -> Optional[Dict]:
         """Extract required data from version info"""
@@ -183,75 +221,98 @@ class ModpackManager:
             "fileSize": file_info.get("size", 0)
         }
 
-    def _get_latest_fabric_loader(self) -> Optional[str]:
-        """Fetch the latest Fabric loader version from Fabric Meta API"""
-        try:
+    @staticmethod
+    @functools.lru_cache(maxsize=64)
+    @handle_network_errors
+    def _get_latest_loader_version(loader: str, mc_version: str) -> Optional[str]:
+        """Fetch the latest version for a given loader and Minecraft version (cached)."""
+        if loader == "fabric":
             response = requests.get("https://meta.fabricmc.net/v2/versions/loader", timeout=10)
             if response.status_code == 200:
                 versions = response.json()
-                if versions and len(versions) > 0:
-                    # First item is the latest stable version
+                if versions:
                     return versions[0].get("version")
-            return None
-        except requests.RequestException as e:
-            print(f"Error fetching Fabric loader versions: {e}")
-            return None
 
-    def _get_latest_forge_version(self, mc_version: str) -> Optional[str]:
-        """Fetch the latest Forge version for a Minecraft version"""
-        try:
-            # Use Forge promotions API
-            response = requests.get("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json", timeout=10)
+        elif loader == "forge":
+            response = requests.get(
+                "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+                timeout=10
+            )
             if response.status_code == 200:
-                data = response.json()
-                promos = data.get("promos", {})
-                # Look for recommended version first, then latest
-                recommended_key = f"{mc_version}-recommended"
-                latest_key = f"{mc_version}-latest"
-                
-                version = promos.get(recommended_key) or promos.get(latest_key)
+                promos = response.json().get("promos", {})
+                version = promos.get(f"{mc_version}-recommended") or promos.get(f"{mc_version}-latest")
                 if version:
                     return f"{mc_version}-{version}"
-            return None
-        except requests.RequestException as e:
-            print(f"Error fetching Forge versions: {e}")
-            return None
 
-    def _get_latest_neoforge_version(self) -> Optional[str]:
-        """Fetch the latest NeoForge version from NeoForged Maven"""
-        try:
-            response = requests.get("https://maven.neoforged.net/api/v1/maven/versions/releases/net/neoforged/neoforge", timeout=10)
+        elif loader == "neoforge":
+            response = requests.get(
+                "https://maven.neoforged.net/api/v1/maven/versions/releases/net/neoforged/neoforge",
+                timeout=10
+            )
             if response.status_code == 200:
-                data = response.json()
-                versions = data.get("versions", [])
-                if versions and len(versions) > 0:
-                    # Return the latest version (first in the list)
+                versions = response.json().get("versions", [])
+                if versions:
                     return versions[0]
-            return None
-        except requests.RequestException as e:
-            print(f"Error fetching NeoForge versions: {e}")
-            return None
 
-    def _get_latest_quilt_loader(self) -> Optional[str]:
-        """Fetch the latest Quilt loader version from Quilt Meta API"""
-        try:
+        elif loader == "quilt":
             response = requests.get("https://meta.quiltmc.org/v3/versions/loader", timeout=10)
             if response.status_code == 200:
                 versions = response.json()
-                if versions and len(versions) > 0:
-                    # First item is the latest stable version
+                if versions:
                     return versions[0].get("version")
-            return None
-        except requests.RequestException as e:
-            print(f"Error fetching Quilt loader versions: {e}")
-            return None
 
-    def cmd_new(self):
-        """Create new modpack"""
+        return None
+
+    @staticmethod
+    @functools.lru_cache(maxsize=8)
+    @handle_network_errors
+    def _get_latest_minecraft_versions(limit: int = 5) -> List[str]:
+        """Fetch recent Minecraft versions from Modrinth API (cached)."""
+        response = requests.get(
+            f"{MODRINTH_API}/tag/game_version",
+            timeout=10
+        )
+        if response.status_code == 200:
+            versions = response.json()
+            # Filter for release versions (not snapshots) and sort by date (newest first)
+            releases = [
+                v for v in versions
+                if v.get("version_type") == "release"
+            ]
+            # Sort by date descending (most recent first)
+            releases.sort(key=lambda x: x.get("date", ""), reverse=True)
+            return [v["version"] for v in releases[:limit]]
+        return []
+
+    @staticmethod
+    @handle_network_errors
+    def _lookup_mod_by_hash(sha1_hash: str):
+        """Lookup mod project_id and file_id by sha1 hash via Modrinth API."""
+        response = requests.get(
+            f"{MODRINTH_API}/version_file/{sha1_hash}",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("project_id"), data.get("id")
+        # Try alternative endpoint
+        response = requests.get(
+            f"{MODRINTH_API}/version_file/{sha1_hash}?algorithm=sha1",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("project_id"), data.get("id")
+        return None, None
+
+    def cmd_new(self, name: Optional[str] = None, loader: Optional[str] = None,
+                mc_version: Optional[str] = None, loader_version: Optional[str] = None):
+        """Create new modpack. Supports both interactive and scripted modes."""
         if not self._ensure_storage_path():
             return
 
-        name = input("Enter modpack name: ").strip()
+        if name is None:
+            name = input("Enter modpack name: ").strip()
         if not name:
             print("Error: Name is required!")
             return
@@ -262,48 +323,55 @@ class ModpackManager:
             print(f"Error: Modpack '{name}' already exists!")
             return
 
-        print("Select loader:")
-        print("1. Forge")
-        print("2. Fabric")
-        print("3. Quilt")
-        print("4. NeoForge")
-        
-        loader_choice = input("Enter loader number (1-4): ").strip()
-        loaders = {"1": "forge", "2": "fabric", "3": "quilt", "4": "neoforge"}
-        
-        if loader_choice not in loaders:
-            print("Error: Invalid choice!")
+        valid_loaders = {"1": "forge", "2": "fabric", "3": "quilt", "4": "neoforge"}
+        if loader is None:
+            print("Select loader:")
+            print("1. Forge")
+            print("2. Fabric")
+            print("3. Quilt")
+            print("4. NeoForge")
+            loader_choice = input("Enter loader number (1-4): ").strip()
+            if loader_choice not in valid_loaders:
+                print("Error: Invalid choice!")
+                return
+            loader = valid_loaders[loader_choice]
+        elif loader.lower() not in valid_loaders.values():
+            print(f"Error: Unknown loader '{loader}'. Choose: fabric, forge, quilt, neoforge")
             return
-        
-        loader = loaders[loader_choice]
-        
-        mc_version = input("Enter Minecraft version (e.g. 1.20.1): ").strip()
+        else:
+            loader = loader.lower()
+
+        if mc_version is None:
+            # Fetch latest versions for suggestions
+            latest_versions = ModpackManager._get_latest_minecraft_versions(5)
+            if latest_versions:
+                default_mc = latest_versions[0]
+                mc_input = input(f"Enter the Minecraft version (latest {default_mc}): ").strip()
+                mc_version = mc_input if mc_input else default_mc
+            else:
+                mc_version = input("Enter the Minecraft version (e.g. 26.1.2): ").strip()
         if not mc_version:
             print("Error: Minecraft version is required!")
             return
 
         # Auto-fetch loader version based on selected loader
         print(f"🔍 Fetching latest {loader.capitalize()} version...")
-        loader_version = None
-        
-        if loader == "fabric":
-            loader_version = self._get_latest_fabric_loader()
-        elif loader == "forge":
-            loader_version = self._get_latest_forge_version(mc_version)
-        elif loader == "neoforge":
-            loader_version = self._get_latest_neoforge_version()
-        elif loader == "quilt":
-            loader_version = self._get_latest_quilt_loader()
-        
-        if loader_version:
-            print(f"✅ Auto-selected {loader.capitalize()} version: {loader_version}")
+        fetched_loader_version = ModpackManager._get_latest_loader_version(loader, mc_version)
+
+        if loader_version is not None:
+            # User provided explicit version
+            pass
+        elif fetched_loader_version:
+            print(f"✅ Auto-selected {loader.capitalize()} version: {fetched_loader_version}")
             confirm = input("Use this version? (y/n): ").strip().lower()
             if confirm == 'n':
                 loader_version = input(f"Enter {loader.capitalize()} version manually: ").strip()
+            else:
+                loader_version = fetched_loader_version
         else:
             print(f"⚠️ Could not auto-fetch {loader.capitalize()} version. Please enter manually.")
             loader_version = input(f"Enter {loader.capitalize()} version: ").strip()
-        
+
         if not loader_version:
             print(f"Error: {loader.capitalize()} version is required!")
             return
@@ -311,7 +379,7 @@ class ModpackManager:
         # Create folder and unified modpack.json
         try:
             modpack_path.mkdir(parents=True, exist_ok=True)
-            
+
             # Create unified modpack.json
             modpack_data = {
                 "name": name,
@@ -321,18 +389,17 @@ class ModpackManager:
                 "loader_version": loader_version,
                 "mods": []
             }
-            with open(modpack_path / "modpack.json", 'w', encoding='utf-8') as f:
-                json.dump(modpack_data, f, indent=2, ensure_ascii=False)
-            
+            self._write_json(modpack_path / "modpack.json", modpack_data)
+
             # Set as active modpack
             self.config["active_modpack"] = name
             self._save_config()
             self._update_active_path()
-            
+
             print(f"✅ Modpack '{name}' created successfully!")
             print(f"   Loader: {loader.capitalize()} {loader_version}")
             print(f"   Minecraft: {mc_version}")
-            
+
         except Exception as e:
             print(f"Error creating modpack: {e}")
             if modpack_path.exists():
@@ -414,9 +481,8 @@ class ModpackManager:
                 return
 
         try:
-            with open(export_path, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, indent=2, ensure_ascii=False)
-            
+            self._write_json(export_path, export_data)
+
             print(f"\n✅ Modpack exported successfully!")
             print(f"📄 File: {export_path}")
             print(f"📦 {info['name']} v{info['version']}")
@@ -443,14 +509,9 @@ class ModpackManager:
             print(f"Error: File '{file_path}' not found!")
             return
 
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                index_data = json.load(f)
-        except json.JSONDecodeError:
-            print("Error: Invalid JSON file!")
-            return
-        except Exception as e:
-            print(f"Error reading file: {e}")
+        index_data = self._read_json(file_path)
+        if index_data is None:
+            print("Error: Could not read JSON file or file is empty!")
             return
 
         # Validate format
@@ -516,27 +577,7 @@ class ModpackManager:
             sha1_hash = hashes.get("sha1", "")
             
             if sha1_hash:
-                try:
-                    response = requests.get(
-                        f"{MODRINTH_API}/version_file/{sha1_hash}",
-                        timeout=10
-                    )
-                    if response.status_code == 200:
-                        version_info = response.json()
-                        project_id = version_info.get("project_id")
-                        file_id = version_info.get("id")
-                    else:
-                        # Try alternative endpoint
-                        response = requests.get(
-                            f"{MODRINTH_API}/version_file/{sha1_hash}?algorithm=sha1",
-                            timeout=10
-                        )
-                        if response.status_code == 200:
-                            version_info = response.json()
-                            project_id = version_info.get("project_id")
-                            file_id = version_info.get("id")
-                except Exception:
-                    pass
+                project_id, file_id = ModpackManager._lookup_mod_by_hash(sha1_hash)
 
             # If we couldn't get project_id from API, use filename as placeholder
             if not project_id:
@@ -566,8 +607,7 @@ class ModpackManager:
             "loader_version": loader_version,
             "mods": mods
         }
-        with open(modpack_path / "modpack.json", 'w', encoding='utf-8') as f:
-            json.dump(modpack_data, f, indent=2, ensure_ascii=False)
+        self._write_json(modpack_path / "modpack.json", modpack_data)
 
         # Create build folder with the imported index
         build_folder = modpack_path / "build"
@@ -616,14 +656,9 @@ class ModpackManager:
             print(f"Error: File '{file_path}' not found!")
             return
 
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                export_data = json.load(f)
-        except json.JSONDecodeError:
-            print("Error: Invalid JSON file!")
-            return
-        except Exception as e:
-            print(f"Error reading file: {e}")
+        export_data = self._read_json(file_path)
+        if export_data is None:
+            print("Error: Could not read JSON file or file is empty!")
             return
 
         # Validate format
@@ -667,8 +702,7 @@ class ModpackManager:
             "loader_version": modpack_info.get("loader_version", "unknown"),
             "mods": mods
         }
-        with open(modpack_path / "modpack.json", 'w', encoding='utf-8') as f:
-            json.dump(modpack_data, f, indent=2, ensure_ascii=False)
+        self._write_json(modpack_path / "modpack.json", modpack_data)
 
         print(f"\n🔍 Imported {len(mods)} mods")
         for mod in mods:
@@ -687,9 +721,9 @@ class ModpackManager:
         print("=" * 50)
         print(f"📦 {name}")
         print("=" * 50)
-        print(f"  Modpack Version: {info['version']}")
-        print(f"  Minecraft:       {info['mc_version']}")
-        print(f"  Loader:          {info['loader'].capitalize()} {info['loader_version']}")
+        print(f"  Modpack Version: {modpack_data['version']}")
+        print(f"  Minecraft:       {modpack_data['mc_version']}")
+        print(f"  Loader:          {modpack_data['loader'].capitalize()} {modpack_data['loader_version']}")
         print(f"  Mods Count:      {len(mods)}")
         print(f"  Required Mods:   {required_count}")
         print(f"  Optional Mods:   {optional_count}")
@@ -697,8 +731,13 @@ class ModpackManager:
         print(f"  Status:          ✅ Imported & Active")
         print("=" * 50)
 
-    def cmd_add_mod(self, project_id: Optional[str] = None):
-        """Add mod to active modpack"""
+    def cmd_add_mod(self, project_id: Optional[str] = None, required: Optional[bool] = None):
+        """Add mod to active modpack
+        
+        Args:
+            project_id: Modrinth Project ID (optional, will prompt if not provided)
+            required: True for required mod, False for optional mod (optional, will prompt if not provided)
+        """
         if not self.active_modpack_path:
             print("No active modpack. Use -n to create a modpack or -omp to open an existing one.")
             return
@@ -716,8 +755,9 @@ class ModpackManager:
 
         print(f"📦 Mod: {project_data.get('title', 'Unknown')}")
         
-        required_input = input("Is this mod required? (y/n): ").strip().lower()
-        required = required_input == 'y'
+        if required is None:
+            required_input = input("Is this mod required? (y/n): ").strip().lower()
+            required = required_input == 'y'
 
         # Fetch active modpack info
         info = self._get_modpack_info(self.config["active_modpack"])
@@ -765,9 +805,48 @@ class ModpackManager:
         }
 
         mods.append(new_mod)
+
+        # Resolve required dependencies
+        deps = version_data.get("dependencies", [])
+        required_deps = [d for d in deps if d.get("dependency_type") == "required"]
+        if required_deps:
+            print(f"\n📦 This mod has {len(required_deps)} required dependencies:")
+            for dep in required_deps:
+                dep_pid = dep.get("project_id", "unknown")
+                dep_data = ModpackManager._fetch_modrinth_project(dep_pid)
+                dep_name = dep_data.get("title", dep_pid) if dep_data else dep_pid
+                print(f"  • {dep_name} ({dep_pid})")
+            add_deps = input("Add all required dependencies? (y/n): ").strip().lower()
+            if add_deps == 'y':
+                for dep in required_deps:
+                    dep_pid = dep.get("project_id")
+                    if not dep_pid or any(m["project_id"] == dep_pid for m in mods):
+                        continue
+                    dep_version = ModpackManager._fetch_compatible_version(dep_pid, loader, mc_version)
+                    if dep_version:
+                        dep_project = ModpackManager._fetch_modrinth_project(dep_pid)
+                        dep_mod_data = self._extract_mod_data(dep_version)
+                        if dep_mod_data:
+                            mods.append({
+                                "project_id": dep_pid,
+                                "file_id": dep_mod_data["file_id"],
+                                "name": dep_project.get("title", dep_pid) if dep_project else dep_pid,
+                                "required": True,
+                                "filename": dep_mod_data["filename"],
+                                "downloads": dep_mod_data["downloads"],
+                                "sha1": dep_mod_data["sha1"],
+                                "sha512": dep_mod_data["sha512"],
+                                "fileSize": dep_mod_data["fileSize"]
+                            })
+                            print(f"  ✅ Added dependency '{dep_project.get('title', dep_pid) if dep_project else dep_pid}'")
+                        else:
+                            print(f"  ⚠️ Could not extract file data for dependency {dep_pid}")
+                    else:
+                        print(f"  ⚠️ No compatible version found for dependency {dep_pid}")
+
         self._save_mods_list(mods)
-        
-        print(f"✅ Added mod '{new_mod['name']}' successfully!")
+
+        print(f"\n✅ Added mod '{new_mod['name']}' successfully!")
         print(f"   File: {new_mod['filename']}")
         print(f"   Required: {'Yes' if required else 'No'}")
 
@@ -1048,21 +1127,23 @@ class ModpackManager:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             archive_folder = self.active_modpack_path / "build_archive" / f"build_{timestamp}"
             archive_folder.mkdir(parents=True, exist_ok=True)
-            
+
             # Move old build to archive
             archive_path = archive_folder / "modrinth.index.json"
             shutil.move(str(output_path), str(archive_path))
-            
+
             # Also copy modpack.json for complete backup
             modpack_json_path = self.active_modpack_path / "modpack.json"
             if modpack_json_path.exists():
                 shutil.copy(str(modpack_json_path), str(archive_folder / "modpack.json"))
-            
+
             print(f"📦 Old build archived: {archive_folder}")
-        
+
+            # Cleanup old archives (keep max 10)
+            self._cleanup_old_archives()
+
         # Write new file
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(index_data, f, indent=4, ensure_ascii=False)
+        self._write_json(output_path, index_data)
 
         print(f"✅ Modpack built successfully!")
         print(f"📁 Folder: {output_folder}")
@@ -1125,22 +1206,43 @@ class ModpackManager:
                         new_mc_version = info['mc_version']
 
                 loader = info["loader"]
-                mods_path = target / "mods.json"
-                
-                if not mods_path.exists():
-                    print("No mods to update.")
+                modpack_data = self._load_modpack_data(target.name)
+
+                if not modpack_data:
+                    print("Error: Cannot read modpack data!")
                     return
 
-                with open(mods_path, 'r', encoding='utf-8') as f:
-                    current_mods = json.load(f).get("mods", [])
+                # Validate loader availability for new MC version
+                if change_mc == 'y':
+                    print(f"🔍 Checking {loader.capitalize()} availability for MC {new_mc_version}...")
+                    new_loader_version = ModpackManager._get_latest_loader_version(loader, new_mc_version)
+                    if new_loader_version:
+                        print(f"✅ Compatible {loader.capitalize()} version found: {new_loader_version}")
+                        update_loader = input("Update loader version too? (y/n): ").strip().lower()
+                        if update_loader == 'y':
+                            modpack_data["loader_version"] = new_loader_version
+                    else:
+                        print(f"⚠️ No {loader.capitalize()} version found for MC {new_mc_version}. Mods may not work!")
+                        proceed = input("Continue anyway? (y/n): ").strip().lower()
+                        if proceed != 'y':
+                            print("Version change cancelled.")
+                            return
+
+                current_mods = modpack_data.get("mods", [])
 
                 if not current_mods:
                     print("No mods to update.")
                     # Update modpack version only
-                    info["version"] = new_mp_version
-                    info["mc_version"] = new_mc_version
-                    with open(target / "info.json", 'w', encoding='utf-8') as f:
-                        json.dump(info, f, indent=2, ensure_ascii=False)
+                    modpack_data["version"] = new_mp_version
+                    modpack_data["mc_version"] = new_mc_version
+                    self._save_modpack_data(
+                        modpack_data["name"],
+                        new_mp_version,
+                        new_mc_version,
+                        modpack_data["loader"],
+                        modpack_data["loader_version"],
+                        []
+                    )
                     print(f"✅ Updated modpack to v{new_mp_version} (MC {new_mc_version})")
                     return
 
@@ -1211,9 +1313,8 @@ class ModpackManager:
                         "loader_version": info["loader_version"],
                         "mods": final_mods
                     }
-                    with open(target / "modpack.json", 'w', encoding='utf-8') as f:
-                        json.dump(modpack_data, f, indent=2, ensure_ascii=False)
-                    
+                    self._write_json(target / "modpack.json", modpack_data)
+
                     removed_count = len(unavailable) if keep_unsupported != 'y' else 0
                     kept_count = len(unavailable) if keep_unsupported == 'y' else 0
                     
@@ -1479,7 +1580,7 @@ def print_cli_help():
     print("  -mpe                  Export modpack to JSON")
     print("  -omp <name>           Open modpack")
     print("  -emp                  Deactivate modpack")
-    print("  -am [project_id]      Add mod")
+    print("  -am [project_id] [--t|--f]  Add mod (--t=required, --f=optional)")
     print("  -rm                   Remove mod")
     print("  -rmp                  Remove modpack completely")
     print("  -lmp                  List modpacks")
