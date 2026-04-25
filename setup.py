@@ -9,8 +9,8 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="mpm-modpack-manager",
-    version="1.0.1",
+    name="mcmpm",
+    version="1.0.3",
     author="AhmedShah29",
     description="A CLI tool for creating and managing Minecraft modpacks",
     long_description=long_description,
