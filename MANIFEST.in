@@ -2,3 +2,7 @@ include README.md
 include LICENSE
 include requirements.txt
 exclude test_mpm.py
+exclude .PROMPT.md
+exclude .windsurf
+exclude .github
+exclude dist
