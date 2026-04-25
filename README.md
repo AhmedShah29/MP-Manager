@@ -1,6 +1,8 @@
-# Modpack Manager (mpm)
+# Modpack Manager (mpm) v1.0.3
 
 An interactive CLI tool for creating and managing Minecraft (Java Edition) modpacks via the Modrinth platform.
+
+> **Note:** Version 1.0.2 was skipped due to PyPI package uploading issues.
 
 ## Features
 
@@ -19,7 +21,12 @@ An interactive CLI tool for creating and managing Minecraft (Java Edition) modpa
 
 ## Installation
 
-### From GitHub (Recommended)
+### From PyPI (Recommended)
+```bash
+pip install mcmpm
+```
+
+### From GitHub
 ```bash
 pip install git+https://github.com/AhmedShah29/MP-Manager.git
 ```
