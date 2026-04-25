@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import sys
+import zipfile
 import requests
 from pathlib import Path
 from typing import Optional, Dict, List, Any
@@ -354,23 +355,36 @@ class ModpackManager:
             print("Error: Minecraft version is required!")
             return
 
-        # Auto-fetch loader version based on selected loader
-        print(f"🔍 Fetching latest {loader.capitalize()} version...")
-        fetched_loader_version = ModpackManager._get_latest_loader_version(loader, mc_version)
+        # Handle loader version based on config mode
+        mode = self.config.get("loader_version_mode", "ask")
 
         if loader_version is not None:
-            # User provided explicit version
+            # User provided explicit version via CLI args
             pass
-        elif fetched_loader_version:
-            print(f"✅ Auto-selected {loader.capitalize()} version: {fetched_loader_version}")
-            confirm = input("Use this version? (y/n): ").strip().lower()
-            if confirm == 'n':
-                loader_version = input(f"Enter {loader.capitalize()} version manually: ").strip()
-            else:
-                loader_version = fetched_loader_version
-        else:
-            print(f"⚠️ Could not auto-fetch {loader.capitalize()} version. Please enter manually.")
+        elif mode == "manual":
+            # Always ask for manual input
             loader_version = input(f"Enter {loader.capitalize()} version: ").strip()
+        else:
+            # Auto or Ask mode - fetch latest
+            print(f"🔍 Fetching latest {loader.capitalize()} version...")
+            fetched_loader_version = ModpackManager._get_latest_loader_version(loader, mc_version)
+
+            if fetched_loader_version:
+                if mode == "auto":
+                    # Auto-use without asking
+                    loader_version = fetched_loader_version
+                    print(f"✅ Auto-selected {loader.capitalize()} version: {fetched_loader_version}")
+                else:  # mode == "ask"
+                    # Show and ask for confirmation
+                    print(f"✅ Found {loader.capitalize()} version: {fetched_loader_version}")
+                    confirm = input("Use this version? (y/n): ").strip().lower()
+                    if confirm == 'n':
+                        loader_version = input(f"Enter {loader.capitalize()} version manually: ").strip()
+                    else:
+                        loader_version = fetched_loader_version
+            else:
+                print(f"⚠️ Could not auto-fetch {loader.capitalize()} version. Please enter manually.")
+                loader_version = input(f"Enter {loader.capitalize()} version: ").strip()
 
         if not loader_version:
             print(f"Error: {loader.capitalize()} version is required!")
@@ -399,6 +413,9 @@ class ModpackManager:
             print(f"✅ Modpack '{name}' created successfully!")
             print(f"   Loader: {loader.capitalize()} {loader_version}")
             print(f"   Minecraft: {mc_version}")
+
+            # Apply auto mods if configured
+            self._apply_auto_mods(loader, mc_version)
 
         except Exception as e:
             print(f"Error creating modpack: {e}")
@@ -431,6 +448,629 @@ class ModpackManager:
         self._save_config()
         self._update_active_path()
         print(f"✅ Deactivated modpack: {name}")
+
+    def cmd_config(self):
+        """Edit app configuration settings"""
+        while True:
+            print("=" * 50)
+            print("   App Configuration")
+            print("=" * 50)
+            print()
+            print("1. Auto mods")
+            print("2. Loader version fetch mode")
+            print("3. Modpacks storage path")
+            print("4. Advanced storage options (copy/link/move)")
+            print("5. Back to main menu")
+            print()
+
+            choice = input("Select option (1-5): ").strip()
+
+            if choice == "1":
+                self._config_auto_mods()
+            elif choice == "2":
+                current = self.config.get("loader_version_mode", "ask")
+                modes = {
+                    "auto": "Auto-use latest version (no prompt)",
+                    "ask": "Ask before using latest (confirm with user)",
+                    "manual": "Always ask for version (manual input)"
+                }
+                print(f"\nCurrent mode: {modes.get(current, current)}")
+                print("\nSelect mode:")
+                print("1. Auto-use latest version (fetch and use without asking)")
+                print("2. Ask before using latest (show fetched version, confirm)")
+                print("3. Always ask for version (manual input, no auto-fetch)")
+                mode_choice = input("Select (1-3): ").strip()
+                if mode_choice == "1":
+                    self.config["loader_version_mode"] = "auto"
+                elif mode_choice == "2":
+                    self.config["loader_version_mode"] = "ask"
+                elif mode_choice == "3":
+                    self.config["loader_version_mode"] = "manual"
+                else:
+                    print("Invalid choice.")
+                    continue
+                self._save_config()
+                print(f"✅ Loader version mode set to: {self.config['loader_version_mode']}")
+            elif choice == "3":
+                current = self.config.get("storage_path", "Not set")
+                print(f"\nCurrent storage path: {current}")
+                new_path = input("Enter new storage path (or press Enter to keep current): ").strip()
+                if new_path:
+                    path = Path(new_path).expanduser().resolve()
+                    path.mkdir(parents=True, exist_ok=True)
+                    self.config["storage_path"] = str(path)
+                    self._save_config()
+                    print(f"✅ Storage path updated: {path}")
+                else:
+                    print("No changes made.")
+            elif choice == "4":
+                self._config_advanced_storage()
+            elif choice == "5":
+                return
+            else:
+                print("Invalid option.")
+
+    def _config_advanced_storage(self):
+        """Configure advanced storage options (copy/link/move) for additional files"""
+        # Initialize storage_mode config if not exists
+        if "storage_mode" not in self.config:
+            self.config["storage_mode"] = "copy"  # copy, link, move
+
+        while True:
+            print("\n" + "=" * 50)
+            print("   Advanced Storage Options")
+            print("=" * 50)
+            print()
+            current = self.config.get("storage_mode", "copy")
+            modes = {
+                "copy": "Copy (safe, portable - recommended)",
+                "link": "Link (symlink - for advanced users)",
+                "move": "Move (destructive - not recommended)"
+            }
+            print(f"Current mode: {modes.get(current, current)}")
+            print()
+            print("⚠️  Warning: Changing storage mode may break portability")
+            print("    or cause data loss. Only proceed if you know what")
+            print("    you are doing.")
+            print()
+            print("1. Copy - Safely copy files to modpack (recommended)")
+            print("2. Link - Create symlinks (changes reflect instantly)")
+            print("3. Move - Move files into modpack (destructive!)")
+            print("4. Back")
+            print()
+
+            choice = input("Select option (1-4): ").strip()
+
+            if choice == "1":
+                self.config["storage_mode"] = "copy"
+                self._save_config()
+                print("✅ Storage mode set to: Copy (safe, portable)")
+            elif choice == "2":
+                print("\n⚠️  WARNING: Link mode creates symlinks that point to")
+                print("    original files. Changes to the source files will")
+                print("    instantly affect the modpack. This mode is NOT")
+                print("    portable across different computers.")
+                confirm = input("Are you sure? (yes/no): ").strip().lower()
+                if confirm == "yes":
+                    self.config["storage_mode"] = "link"
+                    self._save_config()
+                    print("✅ Storage mode set to: Link (symlink)")
+                else:
+                    print("Cancelled.")
+            elif choice == "3":
+                print("\n⚠️  WARNING: Move mode will MOVE (not copy) the original")
+                print("    files into the modpack folder, removing them from")
+                print("    their original location. This is DESTRUCTIVE and")
+                print("    can cause PERMANENT DATA LOSS.")
+                print("    This mode is NOT recommended for most users.")
+                confirm = input("Type 'MOVE' to confirm (any other key to cancel): ").strip()
+                if confirm == "MOVE":
+                    self.config["storage_mode"] = "move"
+                    self._save_config()
+                    print("✅ Storage mode set to: Move (destructive)")
+                else:
+                    print("Cancelled.")
+            elif choice == "4":
+                return
+            else:
+                print("Invalid option.")
+
+    def _config_auto_mods(self):
+        """Configure auto mods submenu"""
+        # Initialize auto_mods config if not exists
+        if "auto_mods" not in self.config:
+            self.config["auto_mods"] = {
+                "mode": "ask",  # ask, auto, never
+                "mods": {}  # {loader: [project_ids]}
+            }
+
+        while True:
+            print("\n" + "=" * 50)
+            print("   Auto Mods Configuration")
+            print("=" * 50)
+            print()
+            mode = self.config["auto_mods"].get("mode", "ask")
+            mode_desc = {"ask": "Ask before adding", "auto": "Auto-add without asking", "never": "Never add"}
+            print(f"Current mode: {mode_desc.get(mode, mode)}")
+            print()
+            print("1. Change auto mod mode")
+            print("2. Add auto mods (-aam)")
+            print("3. List auto mods (-lam)")
+            print("4. Remove auto mod")
+            print("5. Back")
+            print()
+
+            choice = input("Select option (1-5): ").strip()
+
+            if choice == "1":
+                print("\nSelect mode:")
+                print("1. Ask before adding (prompt when creating modpack)")
+                print("2. Don't ask (auto-add to every new modpack)")
+                print("3. Never add (disable auto mods)")
+                mode_choice = input("Select (1-3): ").strip()
+                if mode_choice == "1":
+                    self.config["auto_mods"]["mode"] = "ask"
+                elif mode_choice == "2":
+                    self.config["auto_mods"]["mode"] = "auto"
+                elif mode_choice == "3":
+                    self.config["auto_mods"]["mode"] = "never"
+                else:
+                    print("Invalid choice.")
+                    continue
+                self._save_config()
+                print(f"✅ Auto mod mode set to: {self.config['auto_mods']['mode']}")
+
+            elif choice == "2":
+                self._add_auto_mod_interactive()
+            elif choice == "3":
+                self._list_auto_mods()
+            elif choice == "4":
+                self._remove_auto_mod()
+            elif choice == "5":
+                return
+            else:
+                print("Invalid option.")
+
+    def _add_auto_mod_interactive(self):
+        """Interactive auto mod addition"""
+        print("\nAdd auto mods that will be included in every new modpack")
+        print("Select loader for this auto mod:")
+        loaders = ["fabric", "forge", "quilt", "neoforge"]
+        for i, loader in enumerate(loaders, 1):
+            existing = self.config["auto_mods"]["mods"].get(loader, [])
+            count = len(existing)
+            print(f"{i}. {loader.capitalize()} ({count} auto mods)")
+        print("5. Back")
+
+        choice = input("Select loader (1-5): ").strip()
+        if choice not in ("1", "2", "3", "4"):
+            return
+
+        loader = loaders[int(choice) - 1]
+
+        while True:
+            project_id = input(f"\nEnter Modrinth Project ID for {loader} auto mod (or 'done'): ").strip()
+            if project_id.lower() == "done":
+                break
+            if not project_id:
+                continue
+
+            # Verify the mod exists
+            project_data = ModpackManager._fetch_modrinth_project(project_id)
+            if not project_data:
+                print(f"❌ Could not find mod: {project_id}")
+                retry = input("Try again? (y/n): ").strip().lower()
+                if retry != 'y':
+                    break
+                continue
+
+            # Add to auto mods
+            if loader not in self.config["auto_mods"]["mods"]:
+                self.config["auto_mods"]["mods"][loader] = []
+
+            if project_id in self.config["auto_mods"]["mods"][loader]:
+                print(f"⚠️ {project_id} is already an auto mod for {loader}")
+            else:
+                self.config["auto_mods"]["mods"][loader].append(project_id)
+                self._save_config()
+                print(f"✅ Added '{project_data.get('title', project_id)}' as auto mod for {loader}")
+
+            add_more = input("Add another? (y/n): ").strip().lower()
+            if add_more != 'y':
+                break
+
+    def _list_auto_mods(self):
+        """List all configured auto mods"""
+        print("\n" + "=" * 50)
+        print("   Auto Mods List")
+        print("=" * 50)
+
+        auto_mods = self.config.get("auto_mods", {}).get("mods", {})
+        if not auto_mods:
+            print("\nNo auto mods configured.")
+            return
+
+        for loader, mods in auto_mods.items():
+            print(f"\n{loader.capitalize()}:")
+            if not mods:
+                print("  (none)")
+            for project_id in mods:
+                project_data = ModpackManager._fetch_modrinth_project(project_id)
+                name = project_data.get("title", project_id) if project_data else project_id
+                print(f"  • {name} ({project_id})")
+
+    def _remove_auto_mod(self):
+        """Remove an auto mod"""
+        print("\nRemove auto mod")
+        auto_mods = self.config.get("auto_mods", {}).get("mods", {})
+
+        if not auto_mods:
+            print("No auto mods configured.")
+            return
+
+        # Show all auto mods with numbers
+        all_mods = []
+        for loader, mods in auto_mods.items():
+            for project_id in mods:
+                project_data = ModpackManager._fetch_modrinth_project(project_id)
+                name = project_data.get("title", project_id) if project_data else project_id
+                all_mods.append((loader, project_id, name))
+
+        if not all_mods:
+            print("No auto mods to remove.")
+            return
+
+        print("\nSelect auto mod to remove:")
+        for i, (loader, pid, name) in enumerate(all_mods, 1):
+            print(f"{i}. {name} ({pid}) [{loader}]")
+        print("0. Cancel")
+
+        choice = input("Select (0-{}): ".format(len(all_mods))).strip()
+        if choice == "0" or not choice.isdigit():
+            return
+
+        idx = int(choice) - 1
+        if 0 <= idx < len(all_mods):
+            loader, project_id, name = all_mods[idx]
+            self.config["auto_mods"]["mods"][loader].remove(project_id)
+            self._save_config()
+            print(f"✅ Removed '{name}' from {loader} auto mods")
+
+    def cmd_add_auto_mod(self, loader: Optional[str] = None, project_id: Optional[str] = None):
+        """Add auto mod via CLI (-aam command)"""
+        if loader is None:
+            print("Usage: -aam <loader> <project_id>")
+            print("  loader: fabric, forge, quilt, neoforge")
+            print("  project_id: Modrinth project ID")
+            return
+
+        if project_id is None:
+            print("Error: Project ID required")
+            print("Usage: -aam <loader> <project_id>")
+            return
+
+        if loader not in ("fabric", "forge", "quilt", "neoforge"):
+            print(f"Error: Invalid loader '{loader}'. Use: fabric, forge, quilt, neoforge")
+            return
+
+        # Verify mod exists
+        project_data = ModpackManager._fetch_modrinth_project(project_id)
+        if not project_data:
+            print(f"❌ Could not find mod: {project_id}")
+            return
+
+        # Initialize if needed
+        if "auto_mods" not in self.config:
+            self.config["auto_mods"] = {"mode": "ask", "mods": {}}
+
+        if loader not in self.config["auto_mods"]["mods"]:
+            self.config["auto_mods"]["mods"][loader] = []
+
+        if project_id in self.config["auto_mods"]["mods"][loader]:
+            print(f"⚠️ {project_id} is already an auto mod for {loader}")
+            return
+
+        self.config["auto_mods"]["mods"][loader].append(project_id)
+        self._save_config()
+        print(f"✅ Added '{project_data.get('title', project_id)}' as auto mod for {loader}")
+
+    def cmd_list_auto_mods(self):
+        """List auto mods via CLI (-lam command)"""
+        self._list_auto_mods()
+
+    def _apply_auto_mods(self, loader: str, mc_version: str):
+        """Apply auto mods to newly created modpack"""
+        auto_config = self.config.get("auto_mods", {})
+        mode = auto_config.get("mode", "ask")
+
+        if mode == "never":
+            return
+
+        mods_to_add = auto_config.get("mods", {}).get(loader, [])
+        if not mods_to_add:
+            return
+
+        if mode == "ask":
+            print(f"\n📦 This modpack has {len(mods_to_add)} auto mod(s) for {loader}:")
+            for pid in mods_to_add:
+                pdata = ModpackManager._fetch_modrinth_project(pid)
+                name = pdata.get("title", pid) if pdata else pid
+                print(f"  • {name}")
+            add_them = input("Add these auto mods? (y/n): ").strip().lower()
+            if add_them not in ('y', 'yes'):
+                return
+
+        # Add each auto mod
+        print(f"\n🔧 Adding auto mods for {loader}...")
+        for project_id in mods_to_add:
+            # Check if already added (shouldn't happen on new modpack, but safety)
+            existing_mods = self._get_mods_list()
+            if any(m.get("project_id") == project_id for m in existing_mods):
+                continue
+
+            # Fetch compatible version
+            version_data = ModpackManager._fetch_compatible_version(project_id, loader, mc_version)
+            if not version_data:
+                print(f"  ⚠️ No compatible version for {project_id}")
+                continue
+
+            mod_data = self._extract_mod_data(version_data)
+            if not mod_data:
+                print(f"  ⚠️ Could not extract data for {project_id}")
+                continue
+
+            project_data = ModpackManager._fetch_modrinth_project(project_id)
+
+            new_mod = {
+                "project_id": project_id,
+                "file_id": mod_data["file_id"],
+                "name": project_data.get("title", project_id) if project_data else project_id,
+                "required": True,
+                "filename": mod_data["filename"],
+                "downloads": mod_data["downloads"],
+                "sha1": mod_data["sha1"],
+                "sha512": mod_data["sha512"],
+                "fileSize": mod_data["fileSize"]
+            }
+
+            existing_mods.append(new_mod)
+            print(f"  ✅ Added {new_mod['name']}")
+
+        self._save_mods_list(existing_mods)
+
+    def cmd_add_additional(self, file_type: Optional[str] = None, file_path: Optional[str] = None):
+        """Add additional files to modpack (-aa command)
+
+        Args:
+            file_type: 'config', 'icon', 'overrides', or 'other'
+            file_path: Path to the file
+        """
+        if not self.active_modpack_path:
+            print("No active modpack. Use -omp to open a modpack first.")
+            return
+
+        data = self._load_modpack_data(self.config["active_modpack"])
+        if not data:
+            print("Error: Cannot read modpack data!")
+            return
+
+        # Initialize additional_files if not exists
+        if "additional_files" not in data:
+            data["additional_files"] = {"config": [], "overrides": [], "other": [], "icon": None}
+
+        # Interactive mode - show menu
+        if file_type is None:
+            print("=" * 50)
+            print("   Add Additional Files")
+            print("=" * 50)
+            print()
+            print("Select file type:")
+            print("1. Icon - .png icon for the modpack (root of .mrpack)")
+            print("2. Config - config files (goes to overrides/config/)")
+            print("3. Overrides - general files (goes to overrides/)")
+            print("4. Other - README, licenses (root of .mrpack)")
+            print("5. Back")
+            print()
+
+            choice = input("Select option (1-5): ").strip()
+
+            if choice == "1":
+                file_type = "icon"
+            elif choice == "2":
+                file_type = "config"
+            elif choice == "3":
+                file_type = "overrides"
+            elif choice == "4":
+                file_type = "other"
+            elif choice == "5":
+                return
+            else:
+                print("Invalid option.")
+                return
+
+        # Get file path if not provided
+        if file_path is None:
+            prompt = "Enter file/folder path: " if file_type != "icon" else "Enter icon path (.png): "
+            file_path = input(prompt).strip()
+
+        if not file_path:
+            print("Error: Path is required!")
+            return
+
+        source_path = Path(file_path).expanduser().resolve()
+
+        # Validate path
+        if not source_path.exists():
+            print(f"❌ Path not found: {file_path}")
+            return
+
+        # Validate icon
+        if file_type == "icon":
+            if source_path.suffix.lower() != '.png':
+                print("❌ Icon must be a .png file!")
+                return
+
+        # Get storage mode
+        storage_mode = self.config.get("storage_mode", "copy")
+
+        # Create _mpm_files directory structure
+        mpm_files_dir = self.active_modpack_path / "_mpm_files"
+        type_dir = mpm_files_dir / file_type if file_type != "icon" else mpm_files_dir
+        type_dir.mkdir(parents=True, exist_ok=True)
+
+        # Calculate destination path in _mpm_files
+        if file_type == "icon":
+            dest_path = type_dir / "icon.png"
+        else:
+            dest_path = type_dir / source_path.name
+
+        try:
+            # Handle based on storage mode
+            if storage_mode == "copy":
+                if source_path.is_file():
+                    shutil.copy2(str(source_path), str(dest_path))
+                else:
+                    if dest_path.exists():
+                        shutil.rmtree(str(dest_path))
+                    shutil.copytree(str(source_path), str(dest_path))
+                print(f"📋 Copied to: {dest_path}")
+
+            elif storage_mode == "link":
+                # Create symlink
+                if dest_path.exists() or dest_path.is_symlink():
+                    dest_path.unlink()
+                dest_path.symlink_to(source_path, target_is_directory=source_path.is_dir())
+                print(f"🔗 Linked to: {dest_path}")
+
+            elif storage_mode == "move":
+                if dest_path.exists():
+                    if dest_path.is_dir():
+                        shutil.rmtree(str(dest_path))
+                    else:
+                        dest_path.unlink()
+                shutil.move(str(source_path), str(dest_path))
+                print(f"📦 Moved to: {dest_path}")
+
+            # Store the reference in modpack data (pointing to _mpm_files location)
+            stored_ref = str(dest_path.relative_to(self.active_modpack_path))
+
+            if file_type == "icon":
+                data["additional_files"]["icon"] = stored_ref
+                print(f"✅ Icon added: {source_path.name}")
+            else:
+                current_list = data["additional_files"].get(file_type, [])
+                if stored_ref in current_list:
+                    print(f"⚠️ This {file_type} file is already added!")
+                    return
+                current_list.append(stored_ref)
+                data["additional_files"][file_type] = current_list
+                print(f"✅ Added {file_type} file: {source_path.name}")
+
+            # Save updated data directly to modpack.json
+            modpack_json_path = self.active_modpack_path / "modpack.json"
+            self._write_json(modpack_json_path, data)
+
+            print(f"   Storage mode: {storage_mode}")
+
+        except Exception as e:
+            print(f"❌ Error handling file: {e}")
+
+    def cmd_remove_additional(self):
+        """Remove additional files from modpack (-ra command)"""
+        if not self.active_modpack_path:
+            print("No active modpack. Use -omp to open a modpack first.")
+            return
+
+        data = self._load_modpack_data(self.config["active_modpack"])
+        if not data:
+            print("Error: Cannot read modpack data!")
+            return
+
+        additional_files = data.get("additional_files", {})
+
+        # Collect all files for display
+        all_items = []
+
+        # Icon
+        icon = additional_files.get("icon")
+        if icon:
+            path = Path(icon)
+            all_items.append(("icon", icon, f"🎨 Icon: {path.name}"))
+
+        # Config files
+        config_files = additional_files.get("config", [])
+        for cf in config_files:
+            path = Path(cf)
+            all_items.append(("config", cf, f"⚙️  Config: {path.name}"))
+
+        # Overrides files
+        overrides_files = additional_files.get("overrides", [])
+        for of in overrides_files:
+            path = Path(of)
+            all_items.append(("overrides", of, f"📁 Overrides: {path.name}"))
+
+        # Other files
+        other_files = additional_files.get("other", [])
+        for of in other_files:
+            path = Path(of)
+            all_items.append(("other", of, f"📄 Other: {path.name}"))
+
+        if not all_items:
+            print("No additional files configured for this modpack.")
+            return
+
+        print("=" * 50)
+        print("   Remove Additional Files")
+        print("=" * 50)
+        print()
+        print("Configured additional files:")
+
+        for i, (ftype, fpath, display) in enumerate(all_items, 1):
+            print(f"{i}. {display}")
+
+        print("0. Cancel")
+        print()
+
+        choice = input(f"Select file to remove (0-{len(all_items)}): ").strip()
+
+        if choice == "0":
+            return
+
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(all_items):
+                ftype, fpath, display = all_items[idx]
+
+                # Remove from data
+                if ftype == "icon":
+                    data["additional_files"]["icon"] = None
+                else:
+                    data["additional_files"][ftype].remove(fpath)
+
+                # Save updated data first
+                modpack_json_path = self.active_modpack_path / "modpack.json"
+                self._write_json(modpack_json_path, data)
+
+                # Optionally delete physical file
+                physical_path = self.active_modpack_path / fpath
+                if physical_path.exists():
+                    delete_phys = input(f"Delete physical file from _mpm_files? (y/n): ").strip().lower()
+                    if delete_phys == 'y':
+                        try:
+                            if physical_path.is_dir():
+                                shutil.rmtree(str(physical_path))
+                            else:
+                                physical_path.unlink()
+                            print(f"🗑️  Deleted: {physical_path.name}")
+                        except Exception as e:
+                            print(f"⚠️  Could not delete file: {e}")
+
+                print(f"✅ Removed {ftype} from modpack")
+            else:
+                print("Invalid selection!")
+        except ValueError:
+            print("Please enter a valid number!")
+
 
     def cmd_export_modpack(self):
         """Export modpack to JSON file for sharing"""
@@ -1112,15 +1752,17 @@ class ModpackManager:
         # Create output folder
         output_folder = self.active_modpack_path / "build"
         output_folder.mkdir(parents=True, exist_ok=True)
-        output_path = output_folder / "modrinth.index.json"
-        
-        # Check if old build exists and ask about archiving
+
+        # Check if old .mrpack exists and ask about archiving
+        mrpack_filename = f"{info['name'].replace(' ', '_')}-{info['version']}.mrpack"
+        mrpack_path = output_folder / mrpack_filename
+
         archive_old = False
-        if output_path.exists():
+        if mrpack_path.exists():
             archive_choice = input("Old build exists. Archive it? (y/n): ").strip().lower()
             if archive_choice == 'y':
                 archive_old = True
-        
+
         # Archive old build if requested
         if archive_old:
             from datetime import datetime
@@ -1128,9 +1770,8 @@ class ModpackManager:
             archive_folder = self.active_modpack_path / "build_archive" / f"build_{timestamp}"
             archive_folder.mkdir(parents=True, exist_ok=True)
 
-            # Move old build to archive
-            archive_path = archive_folder / "modrinth.index.json"
-            shutil.move(str(output_path), str(archive_path))
+            # Move old .mrpack to archive
+            shutil.move(str(mrpack_path), str(archive_folder / mrpack_filename))
 
             # Also copy modpack.json for complete backup
             modpack_json_path = self.active_modpack_path / "modpack.json"
@@ -1142,19 +1783,108 @@ class ModpackManager:
             # Cleanup old archives (keep max 10)
             self._cleanup_old_archives()
 
-        # Write new file
-        self._write_json(output_path, index_data)
+        # Load additional files from full modpack data
+        modpack_data = self._load_modpack_data(self.config["active_modpack"])
+        additional_files = modpack_data.get("additional_files", {}) if modpack_data else {}
 
-        print(f"✅ Modpack built successfully!")
-        print(f"📁 Folder: {output_folder}")
-        print(f"📄 File: {output_path}")
-        print(f"📊 Total mods in modpack: {len(mods)}")
-        print(f"✓ Included in build: {len(supported_mods)}")
-        if unsupported_mods:
-            print(f"⚠ Excluded from build: {len(unsupported_mods)} ({', '.join(unsupported_mods)})")
-            print(f"   (These mods stay in modpack.json but won't be in modrinth.index.json)")
-        if archive_old:
-            print(f"📦 Previous build archived")
+        # Structure to hold files with their destination paths in .mrpack
+        # Each item: (source_path, arcname_in_zip)
+        files_to_include = []
+        icon_path = None
+
+        def resolve_path(stored_path):
+            """Resolve stored path to absolute path, handling symlinks"""
+            if Path(stored_path).is_absolute():
+                path = Path(stored_path).expanduser().resolve()
+            else:
+                # Relative to modpack directory
+                path = (self.active_modpack_path / stored_path).resolve()
+            # Resolve symlinks to get actual content
+            if path.is_symlink():
+                target = path.readlink()
+                if not target.is_absolute():
+                    target = path.parent / target
+                path = target.resolve()
+            return path if path.exists() else None
+
+        # Load config files -> go to overrides/config/
+        for cf in additional_files.get("config", []):
+            path = resolve_path(cf)
+            if path:
+                if path.is_file():
+                    files_to_include.append((path, f"overrides/config/{path.name}"))
+                elif path.is_dir():
+                    for file in path.rglob("*"):
+                        if file.is_file():
+                            arcname = f"overrides/config/{path.name}/{file.relative_to(path).as_posix()}"
+                            files_to_include.append((file, arcname))
+
+        # Load overrides files -> go to overrides/
+        for of in additional_files.get("overrides", []):
+            path = resolve_path(of)
+            if path:
+                if path.is_file():
+                    files_to_include.append((path, f"overrides/{path.name}"))
+                elif path.is_dir():
+                    for file in path.rglob("*"):
+                        if file.is_file():
+                            arcname = f"overrides/{path.name}/{file.relative_to(path).as_posix()}"
+                            files_to_include.append((file, arcname))
+
+        # Load other files -> go to root of .mrpack
+        for of in additional_files.get("other", []):
+            path = resolve_path(of)
+            if path:
+                if path.is_file():
+                    files_to_include.append((path, path.name))
+                elif path.is_dir():
+                    for file in path.rglob("*"):
+                        if file.is_file():
+                            arcname = f"{path.name}/{file.relative_to(path).as_posix()}"
+                            files_to_include.append((file, arcname))
+
+        # Load icon
+        icon_file = additional_files.get("icon")
+        if icon_file:
+            path = resolve_path(icon_file)
+            if path and path.suffix.lower() == '.png':
+                icon_path = path
+
+        # Create .mrpack ZIP file directly (no separate modrinth.index.json)
+        try:
+            with zipfile.ZipFile(mrpack_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # Create modrinth.index.json in memory and add to zip
+                index_json = json.dumps(index_data, indent=2, ensure_ascii=False)
+                zf.writestr("modrinth.index.json", index_json)
+
+                # Add modpack.json as metadata backup
+                modpack_json_path = self.active_modpack_path / "modpack.json"
+                if modpack_json_path.exists():
+                    zf.write(modpack_json_path, "modpack.json")
+
+                # Add icon if provided
+                if icon_path:
+                    zf.write(icon_path, "icon.png")
+
+                # Add extra files with proper arcnames
+                for source_path, arcname in files_to_include:
+                    zf.write(source_path, arcname)
+
+            print(f"\n✅ Modpack built successfully!")
+            print(f"📁 Folder: {output_folder}")
+            print(f"📦 .mrpack export: {mrpack_path}")
+            print(f"📊 Total mods in modpack: {len(mods)}")
+            print(f"✓ Included in build: {len(supported_mods)}")
+            if unsupported_mods:
+                print(f"⚠ Excluded from build: {len(unsupported_mods)} ({', '.join(unsupported_mods)})")
+            if files_to_include:
+                print(f"📎 Extra files included: {len(files_to_include)}")
+            if icon_path:
+                print(f"🎨 Icon included: {icon_path.name}")
+            if archive_old:
+                print(f"📦 Previous build archived")
+        except Exception as e:
+            print(f"❌ Error creating .mrpack file: {e}")
 
     def cmd_version_change(self):
         """Change modpack version and update all mods to latest versions"""
@@ -1500,8 +2230,33 @@ class ModpackManager:
         print("  -mpb        Build modpack")
         print("  -mpvc       Change modpack version & update mods")
         print("  -mu         Check and apply mod updates")
+        print("  -aam        Add auto mod")
+        print("  -lam        List auto mods")
+        print("  -aa         Add additional files (config, icon, other)")
+        print("  -ra         Remove additional files")
+        print("  -config     Edit app settings")
         print("  exit        Exit")
         print()
+
+        def _parse_flags(parts, *flag_names):
+            """Parse --flag value pairs from command parts. Returns dict and remaining args."""
+            flags = {f: None for f in flag_names}
+            i = 1
+            while i < len(parts):
+                part = parts[i]
+                if part.startswith("--"):
+                    flag_name = part[2:].replace("-", "_")
+                    if flag_name in flags:
+                        if i + 1 < len(parts) and not parts[i + 1].startswith("-"):
+                            flags[flag_name] = parts[i + 1]
+                            i += 2
+                        else:
+                            i += 1
+                    else:
+                        i += 1
+                else:
+                    i += 1
+            return flags
 
         while True:
             try:
@@ -1516,7 +2271,13 @@ class ModpackManager:
                     print("👋 Goodbye!")
                     break
                 elif command == "-n":
-                    self.cmd_new()
+                    flags = _parse_flags(parts, "name", "loader", "mc_version", "loader_version")
+                    self.cmd_new(
+                        name=flags.get("name"),
+                        loader=flags.get("loader"),
+                        mc_version=flags.get("mc_version"),
+                        loader_version=flags.get("loader_version")
+                    )
                 elif command == "-imp":
                     self.cmd_import_modpack()
                 elif command == "-imp-mr":
@@ -1533,10 +2294,17 @@ class ModpackManager:
                 elif command == "-emp":
                     self.cmd_exit_modpack()
                 elif command == "-am":
-                    if len(parts) >= 2:
-                        self.cmd_add_mod(parts[1])
-                    else:
-                        self.cmd_add_mod()
+                    flags = _parse_flags(parts, "required")
+                    # Check for positional project_id (first non-flag arg)
+                    project_id = None
+                    for i, p in enumerate(parts[1:], 1):
+                        if not p.startswith("-"):
+                            project_id = p
+                            break
+                    required = flags.get("required")
+                    if required is not None:
+                        required = required.lower() in ("y", "yes", "true", "t")
+                    self.cmd_add_mod(project_id, required)
                 elif command == "-rm":
                     self.cmd_remove_mod()
                 elif command == "-rmp":
@@ -1553,6 +2321,36 @@ class ModpackManager:
                     self.cmd_version_change()
                 elif command == "-mu":
                     self.cmd_update_mods()
+                elif command == "-aam":
+                    # Parse positional args for loader and project_id
+                    loader = None
+                    project_id = None
+                    for i, p in enumerate(parts[1:], 1):
+                        if not p.startswith("-"):
+                            if loader is None:
+                                loader = p
+                            elif project_id is None:
+                                project_id = p
+                                break
+                    self.cmd_add_auto_mod(loader, project_id)
+                elif command == "-lam":
+                    self.cmd_list_auto_mods()
+                elif command == "-aa":
+                    # Parse positional args for type and path
+                    file_type = None
+                    file_path = None
+                    for i, p in enumerate(parts[1:], 1):
+                        if not p.startswith("-"):
+                            if file_type is None:
+                                file_type = p
+                            elif file_path is None:
+                                file_path = p
+                                break
+                    self.cmd_add_additional(file_type, file_path)
+                elif command == "-ra":
+                    self.cmd_remove_additional()
+                elif command == "-config":
+                    self.cmd_config()
                 else:
                     print(f"❓ Unknown command: {command}")
                     print("Type 'exit' to quit or use a valid command.")
@@ -1589,6 +2387,11 @@ def print_cli_help():
     print("  -mpb                  Build modpack")
     print("  -mpvc                 Change modpack version")
     print("  -mu                   Check and apply mod updates")
+    print("  -aam <loader> <id>    Add auto mod for loader")
+    print("  -lam                  List all auto mods")
+    print("  -aa [type] [path]     Add additional files (config/icon/other)")
+    print("  -ra                   Remove additional files")
+    print("  -config               Edit app settings")
     print()
     print("Run 'mpm' without arguments for interactive mode")
     print()

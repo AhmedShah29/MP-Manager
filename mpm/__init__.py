@@ -25,7 +25,7 @@ Commands:
 For more information: https://github.com/AhmedShah29/MP-Manager
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.3"
 __author__ = "AhmedShah29"
 __license__ = "MIT"
 __all__ = ["ModpackManager"]
